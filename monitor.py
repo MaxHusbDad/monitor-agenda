@@ -217,10 +217,37 @@ def _avanzar_mes(page) -> bool:
     return True
 
 
+SEL_DIA_LIBRE = f"{SEL_DIA}.cursor-pointer:not(.cursor-not-allowed)"
+SEL_DIA_BLOQ = f"{SEL_DIA}.cursor-not-allowed"
+
+
+def _esperar_calendario(page) -> None:
+    """Espera a que la disponibilidad se asiente antes de leer.
+
+    Al renderizar, el widget marca TODAS las celdas como disponibles y recién
+    después aplica los días bloqueados desde el backend. Leer en ese instante
+    daba bloques contiguos de días fantasma (falsos 'cupo nuevo'). Esperamos a
+    que aparezca al menos un día bloqueado (señal de que la data se aplicó) y a
+    que la cantidad de días disponibles quede estable en dos lecturas seguidas.
+    """
+    try:
+        page.wait_for_selector(SEL_DIA_BLOQ, timeout=6_000)
+    except PlaywrightTimeoutError:
+        pass   # mes íntegramente disponible (raro): seguimos igual
+    prev = -1
+    for _ in range(6):
+        page.wait_for_timeout(500)
+        actual = page.locator(SEL_DIA_LIBRE).count()
+        if actual == prev:
+            return
+        prev = actual
+
+
 def _leer_agenda_calendario(page, hoy: date, fin: date, semanas: int) -> list[date]:
     """Lee los días disponibles del calendario ya cargado, dentro de la ventana."""
     fechas: list[date] = []
     for _ in range(semanas // 4 + 2):   # tope de meses a revisar
+        _esperar_calendario(page)       # evita leer días fantasma sin asentar
         mes, anio = _mes_dropdown(page)
         fechas += _dias_disponibles_en_vista(page, mes, anio)
         if date(anio, mes, monthrange(anio, mes)[1]) >= fin:
