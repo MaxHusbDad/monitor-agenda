@@ -3,12 +3,12 @@ name: monitor-agenda
 on:
   schedule:
     - cron: "*/5 * * * *"        # cada 5 min (repo público: cron gratis, best-effort)
-  workflow_dispatch:              # gatillar a mano desde la pestaña Actions
+  workflow_dispatch:              # gatillar a mano o vía API (trigger externo)
     inputs:
       forzar_resumen:
         description: "Forzar el envío del resumen en esta corrida"
         type: boolean
-        default: true
+        default: false            # el ping externo NO fuerza resumen; tildar para prueba manual
 
 permissions:
   contents: read
