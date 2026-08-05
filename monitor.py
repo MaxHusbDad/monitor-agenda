@@ -109,7 +109,8 @@ def listar_profesionales(page, cfg: Config) -> list[dict]:
             "testid": el.get_attribute("data-testid"),
             "nombre": (el.inner_text() or "").strip(),
         })
-    log(f"Profesionales encontrados: {[p['nombre'] for p in profs]}")
+    # No logueamos los nombres: el repo es público y los logs de Actions también.
+    log(f"Profesionales encontrados: {len(profs)}")
     return profs
 
 
@@ -210,7 +211,8 @@ def revisar_web(cfg: Config) -> dict:
         try:
             profesionales = listar_profesionales(page, cfg)
             agenda: dict[str, list[date]] = {}
-            for prof in profesionales:
+            for i, prof in enumerate(profesionales, start=1):
+                etiqueta = f"Profesional {i}"   # nunca el nombre real (privacidad)
                 _navegar_a_profesionales(page, cfg)
                 page.locator(f'{SEL_OPCION}[data-testid="{prof["testid"]}"]').click()
                 _click_continuar(page)
@@ -226,8 +228,8 @@ def revisar_web(cfg: Config) -> dict:
                         break
 
                 dias = sorted({f for f in fechas if hoy <= f <= fin})
-                agenda[prof["nombre"]] = dias
-                log(f"{prof['nombre']}: {len(dias)} día(s) disponible(s) en la ventana")
+                agenda[etiqueta] = dias
+                log(f"{etiqueta}: {len(dias)} día(s) disponible(s) en la ventana")
             return {"ok": True, "agenda": agenda}
         except PlaywrightTimeoutError as e:
             _dump_debug(page, "timeout")
