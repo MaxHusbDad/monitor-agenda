@@ -256,7 +256,7 @@ def revisar_web(cfg: Config) -> dict:
         page = browser.new_page()
         try:
             agenda: dict[str, dict[str, list[date]]] = {}
-            for flow in cfg.flows:
+            for fi, flow in enumerate(cfg.flows, start=1):
                 label = flow["label"]
                 profs = listar_profesionales(page, cfg.url, flow["cat"], flow["int"])
                 por_prof: dict[str, list[date]] = {}
@@ -267,7 +267,9 @@ def revisar_web(cfg: Config) -> dict:
                     page.wait_for_selector(SEL_DIA, timeout=15_000)
                     dias = _leer_agenda_calendario(page, hoy, fin, cfg.semanas)
                     por_prof[f"Profesional {i}"] = dias   # nunca el nombre real
-                    log(f"{label} / Profesional {i}: {len(dias)} día(s) en la ventana")
+                    # Log por índice, no por label: los logs de Actions son
+                    # públicos y el label puede tener el nombre real del servicio.
+                    log(f"Flujo {fi} / Profesional {i}: {len(dias)} día(s) en la ventana")
                 agenda[label] = por_prof
             return {"ok": True, "agenda": agenda}
         except PlaywrightTimeoutError as e:
