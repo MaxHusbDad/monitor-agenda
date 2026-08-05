@@ -2,19 +2,34 @@ name: monitor-agenda
 
 on:
   schedule:
-    - cron: "0 * * * *"        # cada hora en punto (repo público: cron gratis)
-  workflow_dispatch:            # permite gatillarlo a mano desde la pestaña Actions
+    - cron: "*/5 * * * *"        # cada 5 min (repo público: cron gratis, best-effort)
+  workflow_dispatch:              # gatillar a mano desde la pestaña Actions
+    inputs:
+      forzar_resumen:
+        description: "Forzar el envío del resumen en esta corrida"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
 
 jobs:
   revisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 5          # corta si algo se cuelga
+    timeout-minutes: 10           # 3 servicios + varios profesionales
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
+      - name: Restaurar estado previo
+        uses: actions/cache@v4
+        with:
+          path: estado.json
+          key: estado-${{ github.run_id }}   # único por corrida -> siempre guarda
+          restore-keys: |
+            estado-                            # restaura el estado más reciente
       - run: pip install -r requirements.txt
       - run: playwright install --with-deps chromium
       - name: Ejecutar monitor
@@ -22,4 +37,6 @@ jobs:
           MONITOR_URL: ${{ secrets.MONITOR_URL }}
           MONITOR_FLOWS: ${{ secrets.MONITOR_FLOWS }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # En corridas manuales, respeta el checkbox; en el cron, no fuerza.
+          MONITOR_FORZAR_RESUMEN: ${{ (github.event_name == 'workflow_dispatch' && inputs.forzar_resumen) && '1' || '0' }}
         run: python monitor.py

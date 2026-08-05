@@ -18,7 +18,20 @@ formulario de datos personales.
   y lee los días seleccionables del calendario.
 - `amerita_aviso(estado)`: aplica la regla de negocio (¿hay cupos en la
   ventana?) y arma el mensaje.
-- `enviar_aviso(topic, mensaje)`: POST a ntfy con el listado de días.
+- `enviar_aviso(topic, mensaje, ...)`: POST a ntfy (título, prioridad, tags).
+
+## Notificaciones
+
+El bot corre cada 5 min (cron) y persiste el estado entre corridas con el cache
+de Actions (`estado.json`), para no repetir avisos:
+
+- **Cupo nuevo** → apenas una corrida detecta un día que no estaba, manda una
+  alerta **urgente** por servicio, con el servicio en el título. Solo avisa días
+  que *aparecen* (no los que se ocupan).
+- **Resumen horario** → cada `MONITOR_RESUMEN_MIN` (60 por defecto) manda sí o sí
+  un resumen con todo lo disponible, aunque no haya cambios.
+- **Primera corrida** (sin estado) → solo el resumen base, sin alertas, para no
+  disparar todo lo disponible de golpe.
 
 ## Configuración (variables de entorno)
 
@@ -32,6 +45,7 @@ servicio se consulta.
 | `MONITOR_FLOWS` | sí | Lista JSON de flujos: `[{"cat","int","label"}]` |
 | `NTFY_TOPIC` | sí | Nombre del topic de ntfy (funciona como secreto) |
 | `MONITOR_SEMANAS` | no | Ventana en semanas (default `4`) |
+| `MONITOR_RESUMEN_MIN` | no | Minutos entre resúmenes forzados (default `60`) |
 | `MONITOR_HEADLESS` | no | `0` para ver el navegador local (default `1`) |
 
 Cada flujo de `MONITOR_FLOWS` revisa una combinación categoría + intervención y,

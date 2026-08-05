@@ -48,6 +48,7 @@ class Config:
     topic: str
     semanas: int
     headless: bool
+    resumen_min: int       # minutos entre resúmenes horarios forzados
 
 
 def cargar_config() -> Config:
@@ -78,6 +79,7 @@ def cargar_config() -> Config:
         topic=os.environ["NTFY_TOPIC"],
         semanas=int(os.environ.get("MONITOR_SEMANAS", "4")),
         headless=os.environ.get("MONITOR_HEADLESS", "1") != "0",
+        resumen_min=int(os.environ.get("MONITOR_RESUMEN_MIN", "60")),
     )
 
 
@@ -282,27 +284,62 @@ def _fmt_fecha(f: date) -> str:
     return f"{DIAS_ABR[f.weekday()]} {f.day} {MESES_ABR[f.month]}"
 
 
-def amerita_aviso(estado: dict) -> tuple[bool, str]:
-    """Decide si hay que avisar y arma el mensaje. Toda la regla vive acá.
-
-    Estructura de entrada: {label_flujo: {"Profesional N": [fechas]}}. Se avisa
-    si algún profesional de algún flujo tiene cupos en la ventana.
-    """
-    agenda = estado.get("agenda", {})
-    bloques = []
-    for label, por_prof in agenda.items():
-        con_cupo = {prof: fechas for prof, fechas in por_prof.items() if fechas}
-        if not con_cupo:
-            continue
-        lineas = [f"[{label}]"]
-        for prof, fechas in con_cupo.items():
-            lineas.append(f"- {prof}: {', '.join(_fmt_fecha(f) for f in fechas)}")
-        bloques.append("\n".join(lineas))
-    if not bloques:
-        return False, "sin novedad: sin cupos en ningún flujo"
-    return True, "Cupos disponibles (próx. 4 semanas):\n" + "\n".join(bloques)
+def _cuerpo_por_prof(por_prof: dict) -> str:
+    """Arma las líneas '- Profesional N: fechas' de los que tienen cupo."""
+    return "\n".join(
+        f"- {prof}: {', '.join(_fmt_fecha(f) for f in fechas)}"
+        for prof, fechas in por_prof.items() if fechas
+    )
 
 
+def _nuevos_cupos(prev_agenda: dict, agenda: dict) -> dict:
+    """Devuelve {servicio: {'Profesional N': [fechas nuevas]}} con SOLO los días
+    que aparecieron respecto a la corrida anterior (no los que se ocuparon)."""
+    nuevos: dict[str, dict[str, list[date]]] = {}
+    for svc, por_prof in agenda.items():
+        prev_prof = (prev_agenda or {}).get(svc, {})
+        for prof, fechas in por_prof.items():
+            antes = set(prev_prof.get(prof, []))
+            agregados = [f for f in fechas if f.isoformat() not in antes]
+            if agregados:
+                nuevos.setdefault(svc, {})[prof] = agregados
+    return nuevos
+
+
+def _agenda_a_json(agenda: dict) -> dict:
+    return {svc: {prof: [f.isoformat() for f in fechas]
+                  for prof, fechas in por_prof.items()}
+            for svc, por_prof in agenda.items()}
+
+
+# --------------------------------------------------------------------------- #
+# Estado persistente (entre corridas, vía cache de Actions)
+# --------------------------------------------------------------------------- #
+def _ruta_estado() -> str:
+    return os.environ.get("MONITOR_ESTADO", "estado.json")
+
+
+def cargar_estado() -> dict | None:
+    ruta = _ruta_estado()
+    if not os.path.exists(ruta):
+        return None
+    try:
+        with open(ruta, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def guardar_estado(agenda: dict, ultimo_resumen: datetime) -> None:
+    with open(_ruta_estado(), "w", encoding="utf-8") as f:
+        json.dump({"agenda": _agenda_a_json(agenda),
+                   "ultimo_resumen": ultimo_resumen.isoformat()},
+                  f, ensure_ascii=False, indent=2)
+
+
+# --------------------------------------------------------------------------- #
+# Envío ntfy
+# --------------------------------------------------------------------------- #
 def _contexto_ssl() -> ssl.SSLContext | None:
     """Usa el bundle de certifi si está instalado (Mac local); si no, cae a los
     certs del sistema (Ubuntu de GitHub Actions). Evita el clásico
@@ -315,19 +352,43 @@ def _contexto_ssl() -> ssl.SSLContext | None:
         return None
 
 
-def enviar_aviso(topic: str, mensaje: str) -> None:
-    """POST del mensaje al topic de ntfy. El topic se lee del entorno (secreto)."""
+def enviar_aviso(topic: str, mensaje: str, titulo: str = "Monitor de agenda",
+                 prioridad: str = "high", tags: str = "calendar") -> None:
+    """POST del mensaje al topic de ntfy. El título va en ASCII (header HTTP)."""
     req = urllib.request.Request(
         f"https://ntfy.sh/{topic}",
         data=mensaje.encode("utf-8"),
-        headers={
-            "Title": "Monitor de agenda",
-            "Priority": "high",
-            "Tags": "calendar",
-        },
+        headers={"Title": titulo, "Priority": prioridad, "Tags": tags},
         method="POST",
     )
     urllib.request.urlopen(req, timeout=10, context=_contexto_ssl())
+
+
+def enviar_alertas_nuevos(cfg: Config, nuevos: dict) -> None:
+    """Una alerta URGENTE por servicio con cupos nuevos (título = servicio)."""
+    for svc, por_prof in nuevos.items():
+        cuerpo = _cuerpo_por_prof(por_prof)
+        if not cuerpo:
+            continue
+        log(f"Alerta de cupo nuevo: {svc}")
+        enviar_aviso(cfg.topic, cuerpo, titulo=f"Nuevo cupo: {svc}",
+                     prioridad="urgent", tags="rotating_light")
+
+
+def enviar_resumen(cfg: Config, agenda: dict) -> None:
+    """Resumen horario: una sola notificación con todos los servicios."""
+    bloques = []
+    for svc, por_prof in agenda.items():
+        cuerpo = _cuerpo_por_prof(por_prof)
+        if cuerpo:
+            bloques.append(f"[{svc}]\n{cuerpo}")
+    if bloques:
+        mensaje = "Disponible ahora:\n" + "\n".join(bloques)
+    else:
+        mensaje = "Sin cupos disponibles en la ventana por ahora."
+    log("Enviando resumen horario")
+    enviar_aviso(cfg.topic, mensaje, titulo="Resumen agenda",
+                 prioridad="default", tags="calendar")
 
 
 def main() -> None:
@@ -337,13 +398,32 @@ def main() -> None:
     if not estado["ok"]:
         log(f"Falló la navegación: {estado['error']}", "ERROR")
         sys.exit(1)
-    aviso, mensaje = amerita_aviso(estado)
-    if aviso:
-        log("Amerita aviso, enviando push")
-        enviar_aviso(cfg.topic, mensaje)
-        log("Push enviado")
+    agenda = estado["agenda"]
+    prev = cargar_estado()
+    ahora = datetime.now()
+    forzar_resumen = os.environ.get("MONITOR_FORZAR_RESUMEN") == "1"
+
+    if prev is None:
+        # Primera corrida (sin estado): resumen base, sin alertas de "nuevo"
+        # para no disparar todo lo disponible de golpe.
+        log("Sin estado previo: resumen base, sin alertas de cupos nuevos")
+        enviar_resumen(cfg, agenda)
+        ultimo_resumen = ahora
     else:
-        log(mensaje)
+        nuevos = _nuevos_cupos(prev.get("agenda", {}), agenda)
+        if nuevos:
+            enviar_alertas_nuevos(cfg, nuevos)
+        else:
+            log("Sin cupos nuevos respecto a la corrida anterior")
+        try:
+            ultimo_resumen = datetime.fromisoformat(prev.get("ultimo_resumen"))
+        except (TypeError, ValueError):
+            ultimo_resumen = datetime.min
+        if forzar_resumen or (ahora - ultimo_resumen) >= timedelta(minutes=cfg.resumen_min):
+            enviar_resumen(cfg, agenda)
+            ultimo_resumen = ahora
+
+    guardar_estado(agenda, ultimo_resumen)
     sys.exit(0)
 
 
