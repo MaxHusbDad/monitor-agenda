@@ -29,11 +29,17 @@ servicio se consulta.
 | Variable | Secreto | Descripción |
 |----------|:------:|-------------|
 | `MONITOR_URL` | sí | URL de la agenda a revisar |
-| `MONITOR_CATEGORIA_ID` | sí | `data-testid` de la categoría a elegir |
-| `MONITOR_INTERVENCION_ID` | sí | `data-testid` de la intervención a elegir |
+| `MONITOR_FLOWS` | sí | Lista JSON de flujos: `[{"cat","int","label"}]` |
 | `NTFY_TOPIC` | sí | Nombre del topic de ntfy (funciona como secreto) |
 | `MONITOR_SEMANAS` | no | Ventana en semanas (default `4`) |
 | `MONITOR_HEADLESS` | no | `0` para ver el navegador local (default `1`) |
+
+Cada flujo de `MONITOR_FLOWS` revisa una combinación categoría + intervención y,
+dentro, todos los profesionales. `cat` e `int` son los `data-testid`; `label` es
+una etiqueta **neutra** para la notificación. **No poner info de salud en
+`label`** (el topic de ntfy no es privado): usar `Servicio 1`, `Servicio 2`, etc.
+y guardar el mapeo real fuera del repo. Los profesionales se muestran como
+`Profesional 1`, `Profesional 2` (nunca el nombre real).
 
 ## Correr local
 
@@ -42,11 +48,9 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 playwright install chromium
 
-export MONITOR_URL="https://..."
-export MONITOR_CATEGORIA_ID="20022"
-export MONITOR_INTERVENCION_ID="371434"
-export NTFY_TOPIC="mi-topic-secreto"
-export MONITOR_HEADLESS=0        # para ver el navegador ejecutando los clicks
+# Copiar .env.example a .env, completar, y cargarlo:
+cp .env.example .env      # editar .env con URL, flujos y topic reales
+set -a && source .env && set +a
 
 python monitor.py
 ```
@@ -69,7 +73,7 @@ del venv (el código lo detecta y lo usa) o corriendo una vez
 ## Configurar GitHub Actions
 
 1. **Settings → Secrets and variables → Actions → Secrets**, crear:
-   `MONITOR_URL`, `MONITOR_CATEGORIA_ID`, `MONITOR_INTERVENCION_ID`, `NTFY_TOPIC`.
+   `MONITOR_URL`, `MONITOR_FLOWS`, `NTFY_TOPIC`.
 2. En la pestaña **Actions**, correr el workflow a mano con **Run workflow**
    (`workflow_dispatch`) para la primera prueba.
 3. El cron horario queda activo solo.
