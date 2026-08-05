@@ -1,0 +1,26 @@
+name: monitor-agenda
+
+on:
+  schedule:
+    - cron: "0 * * * *"        # cada hora en punto (repo público: cron gratis)
+  workflow_dispatch:            # permite gatillarlo a mano desde la pestaña Actions
+
+jobs:
+  revisar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5          # corta si algo se cuelga
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: playwright install --with-deps chromium
+      - name: Ejecutar monitor
+        env:
+          MONITOR_URL: ${{ secrets.MONITOR_URL }}
+          MONITOR_CATEGORIA_ID: ${{ secrets.MONITOR_CATEGORIA_ID }}
+          MONITOR_INTERVENCION_ID: ${{ secrets.MONITOR_INTERVENCION_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+        run: python monitor.py
