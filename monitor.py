@@ -6,6 +6,7 @@ Determinístico, sin LLM en runtime. Ver SPEC.md para el detalle.
 """
 
 import os
+import ssl
 import sys
 import urllib.request
 from calendar import monthrange
@@ -69,9 +70,15 @@ def cargar_config() -> Config:
 # Navegación
 # --------------------------------------------------------------------------- #
 def _abrir_select(page, etiqueta: str) -> None:
-    """Abre un desplegable stf-select por el texto de su placeholder."""
+    """Abre un desplegable stf-select por el texto de su placeholder y espera
+    a que sus opciones queden visibles.
+
+    Los 3 selects tienen su contenedor de opciones en el DOM siempre; el abierto
+    es el único con `visibility: visible`. Por eso filtramos con `:visible`
+    (Playwright respeta visibility:hidden), que aísla el dropdown abierto.
+    """
     page.locator(".stf-select", has_text=etiqueta).locator(SEL_VALUE).first.click()
-    page.wait_for_timeout(300)  # deja que Vue renderice las opciones
+    page.locator(f"{SEL_OPCION}:visible").first.wait_for(timeout=8_000)
 
 
 def _click_continuar(page) -> None:
@@ -93,7 +100,7 @@ def _navegar_a_profesionales(page, cfg: Config) -> None:
 def listar_profesionales(page, cfg: Config) -> list[dict]:
     """Devuelve [{testid, nombre}] de todos los profesionales del desplegable."""
     _navegar_a_profesionales(page, cfg)
-    opciones = page.locator(SEL_OPCION)
+    opciones = page.locator(f"{SEL_OPCION}:visible")   # solo el dropdown abierto
     opciones.first.wait_for(timeout=10_000)
     profs = []
     for i in range(opciones.count()):
@@ -177,6 +184,19 @@ def _avanzar_mes(page) -> bool:
     return True
 
 
+def _dump_debug(page, etiqueta: str) -> None:
+    """Guarda screenshot en MONITOR_DEBUG_DIR si está seteado (solo para debug)."""
+    carpeta = os.environ.get("MONITOR_DEBUG_DIR")
+    if not carpeta:
+        return
+    try:
+        ruta = os.path.join(carpeta, f"debug_{etiqueta}.png")
+        page.screenshot(path=ruta, full_page=True)
+        log(f"Screenshot de debug: {ruta}")
+    except Exception as e:   # nunca romper el flujo por el debug
+        log(f"No se pudo guardar screenshot: {e}", "WARN")
+
+
 def revisar_web(cfg: Config) -> dict:
     """Abre la web, itera cada profesional y junta sus días disponibles.
 
@@ -210,6 +230,7 @@ def revisar_web(cfg: Config) -> dict:
                 log(f"{prof['nombre']}: {len(dias)} día(s) disponible(s) en la ventana")
             return {"ok": True, "agenda": agenda}
         except PlaywrightTimeoutError as e:
+            _dump_debug(page, "timeout")
             return {"ok": False, "error": f"timeout de navegación: {e}"}
         finally:
             browser.close()
@@ -234,6 +255,18 @@ def amerita_aviso(estado: dict) -> tuple[bool, str]:
     return True, "\n".join(lineas)
 
 
+def _contexto_ssl() -> ssl.SSLContext | None:
+    """Usa el bundle de certifi si está instalado (Mac local); si no, cae a los
+    certs del sistema (Ubuntu de GitHub Actions). Evita el clásico
+    CERTIFICATE_VERIFY_FAILED del Python de python.org sin sumar dependencias
+    duras en el runner."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return None
+
+
 def enviar_aviso(topic: str, mensaje: str) -> None:
     """POST del mensaje al topic de ntfy. El topic se lee del entorno (secreto)."""
     req = urllib.request.Request(
@@ -246,7 +279,7 @@ def enviar_aviso(topic: str, mensaje: str) -> None:
         },
         method="POST",
     )
-    urllib.request.urlopen(req, timeout=10)
+    urllib.request.urlopen(req, timeout=10, context=_contexto_ssl())
 
 
 def main() -> None:

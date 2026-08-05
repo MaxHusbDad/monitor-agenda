@@ -51,6 +51,14 @@ export MONITOR_HEADLESS=0        # para ver el navegador ejecutando los clicks
 python monitor.py
 ```
 
+### Certificados en Mac (solo local)
+
+Si al enviar el push local sale `CERTIFICATE_VERIFY_FAILED`, es que el Python de
+python.org no tiene los certs raíz. Se resuelve con `pip install certifi` dentro
+del venv (el código lo detecta y lo usa) o corriendo una vez
+`/Applications/Python 3.13/Install Certificates.command`. En GitHub Actions
+(Ubuntu) no aplica.
+
 ## Configurar ntfy en el iPhone
 
 1. Instalar la app **ntfy** (App Store, gratis).
