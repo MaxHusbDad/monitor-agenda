@@ -48,7 +48,7 @@ class Config:
     topic: str
     semanas: int
     headless: bool
-    resumen_min: int       # minutos entre resúmenes horarios forzados
+    cadencia_min: int      # cada cuántos min corre el bot (ventana del resumen horario)
 
 
 def cargar_config() -> Config:
@@ -79,13 +79,31 @@ def cargar_config() -> Config:
         topic=os.environ["NTFY_TOPIC"],
         semanas=int(os.environ.get("MONITOR_SEMANAS", "4")),
         headless=os.environ.get("MONITOR_HEADLESS", "1") != "0",
-        resumen_min=int(os.environ.get("MONITOR_RESUMEN_MIN", "60")),
+        cadencia_min=int(os.environ.get("MONITOR_CADENCIA_MIN", "5")),
     )
 
 
 # --------------------------------------------------------------------------- #
 # Navegación
 # --------------------------------------------------------------------------- #
+def _esperar_sin_overlay(page, timeout_ms: int = 15_000) -> None:
+    """Espera a que el overlay de carga (vue-loading-overlay) deje de ser visible.
+
+    La web tapa la pantalla mientras trae datos y ese overlay intercepta los
+    clicks. Ojo: la clase `.vld-overlay.is-active` queda SIEMPRE en el DOM; en
+    reposo el overlay está con `display:none` (w=0,h=0). Por eso hay que chequear
+    visibilidad real (display + tamaño), no la presencia de la clase."""
+    try:
+        page.wait_for_function(
+            "() => ![...document.querySelectorAll('.vld-overlay.is-active')]"
+            ".some(e => getComputedStyle(e).display !== 'none'"
+            " && e.getBoundingClientRect().width > 0)",
+            timeout=timeout_ms,
+        )
+    except PlaywrightTimeoutError:
+        pass
+
+
 def _abrir_select(page, etiqueta: str) -> None:
     """Abre un desplegable stf-select por el texto de su placeholder y espera
     a que sus opciones queden visibles.
@@ -94,11 +112,13 @@ def _abrir_select(page, etiqueta: str) -> None:
     es el único con `visibility: visible`. Por eso filtramos con `:visible`
     (Playwright respeta visibility:hidden), que aísla el dropdown abierto.
     """
+    _esperar_sin_overlay(page)
     page.locator(".stf-select", has_text=etiqueta).locator(SEL_VALUE).first.click()
     page.locator(f"{SEL_OPCION}:visible").first.wait_for(timeout=8_000)
 
 
 def _click_continuar(page) -> None:
+    _esperar_sin_overlay(page)
     page.locator(SEL_CONTINUAR).first.click()
     page.wait_for_timeout(500)
 
@@ -202,6 +222,7 @@ def _avanzar_mes(page) -> bool:
     principio de mes normalmente NO se necesita: la última semana del mes actual
     ya muestra los primeros días del siguiente. Igual se deja por robustez.
     """
+    _esperar_sin_overlay(page)
     combo = page.locator(f"{SEL_MES_WRAP} .vs__dropdown-toggle")
     if not combo.count():
         return False
@@ -230,6 +251,7 @@ def _esperar_calendario(page) -> None:
     que aparezca al menos un día bloqueado (señal de que la data se aplicó) y a
     que la cantidad de días disponibles quede estable en dos lecturas seguidas.
     """
+    _esperar_sin_overlay(page)
     try:
         page.wait_for_selector(SEL_DIA_BLOQ, timeout=6_000)
     except PlaywrightTimeoutError:
@@ -289,6 +311,7 @@ def revisar_web(cfg: Config) -> dict:
                 por_prof: dict[str, list[date]] = {}
                 for i, prof in enumerate(profs, start=1):
                     _navegar_a_profesionales(page, cfg.url, flow["cat"], flow["int"])
+                    _esperar_sin_overlay(page)
                     page.locator(f'{SEL_OPCION}[data-testid="{prof["testid"]}"]').click()
                     _click_continuar(page)
                     page.wait_for_selector(SEL_DIA, timeout=15_000)
@@ -359,11 +382,9 @@ def cargar_estado() -> dict | None:
         return None
 
 
-def guardar_estado(agenda: dict, ultimo_resumen: datetime) -> None:
+def guardar_estado(agenda: dict) -> None:
     with open(_ruta_estado(), "w", encoding="utf-8") as f:
-        json.dump({"agenda": _agenda_a_json(agenda),
-                   "ultimo_resumen": ultimo_resumen.isoformat()},
-                  f, ensure_ascii=False, indent=2)
+        json.dump({"agenda": _agenda_a_json(agenda)}, f, ensure_ascii=False, indent=2)
 
 
 # --------------------------------------------------------------------------- #
@@ -420,6 +441,17 @@ def enviar_resumen(cfg: Config, agenda: dict) -> None:
                  prioridad="default", tags="calendar")
 
 
+def _toca_resumen_horario(ahora: datetime, cadencia_min: int) -> bool:
+    """True en la única corrida por hora que cae cerca de la hora en punto.
+
+    Con corridas cada `cadencia_min`, exactamente una por hora cae en el minuto
+    [0, cadencia_min). Decidir por reloj (y no por un timestamp persistido) hace
+    que el resumen salga 1 vez/hora aunque el cache de estado falle o no se
+    restaure: nunca se dispara en cada corrida.
+    """
+    return ahora.minute < cadencia_min
+
+
 def main() -> None:
     cfg = cargar_config()
     log("Iniciando revisión de agenda")
@@ -430,29 +462,29 @@ def main() -> None:
     agenda = estado["agenda"]
     prev = cargar_estado()
     ahora = datetime.now()
-    forzar_resumen = os.environ.get("MONITOR_FORZAR_RESUMEN") == "1"
+    forzar = os.environ.get("MONITOR_FORZAR_RESUMEN") == "1"
+    hay_prev = prev is not None
+    toca = _toca_resumen_horario(ahora, cfg.cadencia_min)
+    log(f"Estado previo: {'sí' if hay_prev else 'no'} | minuto={ahora.minute} | "
+        f"toca_resumen={toca} | forzar={forzar}")
 
-    if prev is None:
-        # Primera corrida (sin estado): resumen base, sin alertas de "nuevo"
-        # para no disparar todo lo disponible de golpe.
-        log("Sin estado previo: resumen base, sin alertas de cupos nuevos")
-        enviar_resumen(cfg, agenda)
-        ultimo_resumen = ahora
-    else:
+    # Alertas de cupos nuevos: necesitan estado previo para comparar.
+    if hay_prev:
         nuevos = _nuevos_cupos(prev.get("agenda", {}), agenda)
         if nuevos:
             enviar_alertas_nuevos(cfg, nuevos)
         else:
             log("Sin cupos nuevos respecto a la corrida anterior")
-        try:
-            ultimo_resumen = datetime.fromisoformat(prev.get("ultimo_resumen"))
-        except (TypeError, ValueError):
-            ultimo_resumen = datetime.min
-        if forzar_resumen or (ahora - ultimo_resumen) >= timedelta(minutes=cfg.resumen_min):
-            enviar_resumen(cfg, agenda)
-            ultimo_resumen = ahora
+    else:
+        log("Sin estado previo (primera corrida o cache no restaurado): sin alertas")
 
-    guardar_estado(agenda, ultimo_resumen)
+    # Resumen: SOLO 1 vez/hora (por reloj) o forzado manual. Nunca en cada corrida.
+    if forzar or toca:
+        enviar_resumen(cfg, agenda)
+    else:
+        log("No corresponde resumen en esta corrida")
+
+    guardar_estado(agenda)
     sys.exit(0)
 
 

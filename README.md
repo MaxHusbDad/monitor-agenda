@@ -28,10 +28,18 @@ de Actions (`estado.json`), para no repetir avisos:
 - **Cupo nuevo** → apenas una corrida detecta un día que no estaba, manda una
   alerta **urgente** por servicio, con el servicio en el título. Solo avisa días
   que *aparecen* (no los que se ocupan).
-- **Resumen horario** → cada `MONITOR_RESUMEN_MIN` (60 por defecto) manda sí o sí
-  un resumen con todo lo disponible, aunque no haya cambios.
-- **Primera corrida** (sin estado) → solo el resumen base, sin alertas, para no
-  disparar todo lo disponible de golpe.
+- **Resumen horario** → una vez por hora (la corrida cuyo minuto cae en
+  `[0, MONITOR_CADENCIA_MIN)`, es decir la más cercana a la hora en punto) manda
+  sí o sí un resumen con todo lo disponible, aunque no haya cambios. La decisión
+  es **por reloj, no por estado persistido**: así el resumen sale 1 vez/hora
+  aunque el cache falle, nunca en cada corrida.
+- **Sin estado previo** (primera corrida o cache no restaurado) → no dispara
+  alertas de "nuevo" (no hay con qué comparar); el resumen sale igual si toca por
+  reloj.
+
+> `MONITOR_CADENCIA_MIN` debe coincidir con el intervalo real del trigger (5 min).
+> El resumen sale en la hora en punto (horario UTC del runner; como Chile tiene
+> offset de horas enteras, cae también en la hora en punto local).
 
 ## Configuración (variables de entorno)
 
@@ -45,7 +53,7 @@ servicio se consulta.
 | `MONITOR_FLOWS` | sí | Lista JSON de flujos: `[{"cat","int","label"}]` |
 | `NTFY_TOPIC` | sí | Nombre del topic de ntfy (funciona como secreto) |
 | `MONITOR_SEMANAS` | no | Ventana en semanas (default `4`) |
-| `MONITOR_RESUMEN_MIN` | no | Minutos entre resúmenes forzados (default `60`) |
+| `MONITOR_CADENCIA_MIN` | no | Cada cuántos min corre el bot; define la ventana del resumen horario (default `5`) |
 | `MONITOR_HEADLESS` | no | `0` para ver el navegador local (default `1`) |
 
 Cada flujo de `MONITOR_FLOWS` revisa una combinación categoría + intervención y,
