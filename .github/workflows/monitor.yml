@@ -18,7 +18,7 @@ permissions:
 jobs:
   revisar:
     runs-on: ubuntu-latest
-    timeout-minutes: 10           # 3 servicios + varios profesionales
+    timeout-minutes: 15           # 3 servicios + profesionales + horas por día
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
