@@ -176,18 +176,47 @@ def _mes_dropdown(page) -> tuple[int, int]:
     return hoy.month, hoy.year
 
 
-def _dias_disponibles_en_vista(page, mes: int, anio: int) -> list[date]:
-    """Extrae las fechas de las celdas seleccionables del calendario cargado.
+def _leer_horas_de_dia(page, cel_libre) -> list[str]:
+    """Clickea un día disponible y devuelve sus horas (`.custom-timeslot-border`).
 
-    Disponible = celda con `cursor-pointer` y SIN `cursor-not-allowed`.
+    Las horas de un día solo se renderizan al seleccionarlo. Best-effort: si
+    algo falla, devuelve [] (el día igual se reporta, sin horas)."""
+    try:
+        cel_libre.click()
+        _esperar_sin_overlay(page)
+        # Los slots pueden cargar progresivamente: esperamos a que la cantidad
+        # quede estable en dos lecturas seguidas (evita leer horas incompletas,
+        # que darían falsas alertas de 'hora nueva').
+        prev = -1
+        for _ in range(6):
+            page.wait_for_timeout(400)
+            n = page.locator(SEL_SLOT).count()
+            if n == prev:
+                break
+            prev = n
+        slots = page.locator(SEL_SLOT)
+        horas = set()
+        for j in range(slots.count()):
+            txt = (slots.nth(j).inner_text() or "").strip()
+            if txt:
+                horas.add(txt)
+        return sorted(horas)
+    except Exception:
+        return []
 
-    FLAG FASE 2: el widget muestra días del mes SIGUIENTE como seleccionables
-    con el dropdown todavía en el mes actual (visto en el HTML: '1' y '4' de
-    septiembre con cursor-pointer mientras el selector decía 'Agosto'). El
-    fechado usa rollover cuando el número de día baja tras fin de mes. Hay que
-    validarlo en vivo con headless=False antes de confiar en el borde de mes.
+
+def _dias_disponibles_en_vista(page, mes: int, anio: int) -> dict:
+    """Devuelve {fecha: [horas]} de las celdas seleccionables del calendario.
+
+    Disponible = celda con `cursor-pointer` y SIN `cursor-not-allowed`. El widget
+    muestra días del mes siguiente como seleccionables con el dropdown aún en el
+    mes actual; el fechado usa rollover cuando el número de día baja tras fin de
+    mes. Se hace en dos fases para no invalidar los locators: primero se fechan
+    todas las celdas disponibles (solo lectura), luego se clickea cada una para
+    leer sus horas.
     """
-    fechas: list[date] = []
+    # Fase 1: fechar cada celda disponible, en orden de aparición
+    fechas_disp: list[date | None] = []
     celdas = page.locator(SEL_DIA)
     m, a, prev = mes, anio, 0
     for i in range(celdas.count()):
@@ -205,13 +234,20 @@ def _dias_disponibles_en_vista(page, mes: int, anio: int) -> list[date]:
                 m, a = 1, a + 1
         prev = dia
         clases = cel.get_attribute("class") or ""
-        disponible = "cursor-pointer" in clases and "cursor-not-allowed" not in clases
-        if disponible:
+        if "cursor-pointer" in clases and "cursor-not-allowed" not in clases:
             try:
-                fechas.append(date(a, m, dia))
+                fechas_disp.append(date(a, m, dia))
             except ValueError:
-                pass
-    return fechas
+                fechas_disp.append(None)   # mantiene alineación con SEL_DIA_LIBRE
+    # Fase 2: click en cada día disponible y leer sus horas
+    resultado: dict[date, list[str]] = {}
+    libres = page.locator(SEL_DIA_LIBRE)
+    for i in range(min(libres.count(), len(fechas_disp))):
+        fecha = fechas_disp[i]
+        if fecha is None:
+            continue
+        resultado[fecha] = _leer_horas_de_dia(page, libres.nth(i))
+    return resultado
 
 
 def _avanzar_mes(page) -> bool:
@@ -263,6 +299,7 @@ def _avanzar_mes(page) -> bool:
 
 SEL_DIA_LIBRE = f"{SEL_DIA}.cursor-pointer:not(.cursor-not-allowed)"
 SEL_DIA_BLOQ = f"{SEL_DIA}.cursor-not-allowed"
+SEL_SLOT = ".custom-timeslot-border"        # cada hora disponible de un día
 
 
 def _esperar_calendario(page) -> None:
@@ -288,14 +325,14 @@ def _esperar_calendario(page) -> None:
         prev = actual
 
 
-def _leer_agenda_calendario(page, hoy: date, fin: date, semanas: int) -> list[date]:
-    """Lee los días disponibles del calendario ya cargado, dentro de la ventana."""
-    fechas: list[date] = []
+def _leer_agenda_calendario(page, hoy: date, fin: date, semanas: int) -> dict:
+    """Lee {día: [horas]} del calendario, dentro de la ventana [hoy, fin]."""
+    dias: dict[date, list[str]] = {}
     for _ in range(semanas // 4 + 2):   # tope de meses a revisar
         try:
             _esperar_calendario(page)   # evita leer días fantasma sin asentar
             mes, anio = _mes_dropdown(page)
-            fechas += _dias_disponibles_en_vista(page, mes, anio)
+            dias.update(_dias_disponibles_en_vista(page, mes, anio))
             if date(anio, mes, monthrange(anio, mes)[1]) >= fin:
                 break
             if not _avanzar_mes(page):
@@ -303,7 +340,7 @@ def _leer_agenda_calendario(page, hoy: date, fin: date, semanas: int) -> list[da
         except Exception as e:   # no propagar: devolvemos lo leído hasta acá
             log(f"Corte de lectura de calendario: {type(e).__name__}", "WARN")
             break
-    return sorted({f for f in fechas if hoy <= f <= fin})
+    return {f: dias[f] for f in sorted(dias) if hoy <= f <= fin}
 
 
 def _dump_debug(page, etiqueta: str) -> None:
@@ -374,31 +411,51 @@ def _fmt_fecha(f: date) -> str:
     return f"{DIAS_ABR[f.weekday()]} {f.day} {MESES_ABR[f.month]}"
 
 
+def _fmt_dia_horas(f: date, horas: list) -> str:
+    """'mar 25 ago — 11:00, 13:20' (o solo el día si no hay horas)."""
+    base = _fmt_fecha(f)
+    return f"{base} — {', '.join(horas)}" if horas else base
+
+
 def _cuerpo_por_prof(por_prof: dict) -> str:
-    """Arma las líneas '- Profesional N: fechas' de los que tienen cupo."""
-    return "\n".join(
-        f"- {prof}: {', '.join(_fmt_fecha(f) for f in fechas)}"
-        for prof, fechas in por_prof.items() if fechas
-    )
+    """Arma el bloque de cada profesional con sus días y horas.
+
+    Estructura de entrada: {'Profesional N': {fecha: [horas]}}.
+    """
+    lineas = []
+    for prof, dias in por_prof.items():
+        if not dias:
+            continue
+        lineas.append(f"{prof}:")
+        for f in sorted(dias):
+            lineas.append(f"  · {_fmt_dia_horas(f, dias[f])}")
+    return "\n".join(lineas)
 
 
 def _nuevos_cupos(prev_agenda: dict, agenda: dict) -> dict:
-    """Devuelve {servicio: {'Profesional N': [fechas nuevas]}} con SOLO los días
-    que aparecieron respecto a la corrida anterior (no los que se ocuparon)."""
-    nuevos: dict[str, dict[str, list[date]]] = {}
+    """Devuelve {servicio: {'Profesional N': {fecha: [horas nuevas]}}} con SOLO
+    los (día, hora) que aparecieron respecto a la corrida anterior. Un día nuevo
+    entero trae todas sus horas; un día ya visto trae solo sus horas nuevas."""
+    nuevos: dict[str, dict[str, dict]] = {}
     for svc, por_prof in agenda.items():
         prev_prof = (prev_agenda or {}).get(svc, {})
-        for prof, fechas in por_prof.items():
-            antes = set(prev_prof.get(prof, []))
-            agregados = [f for f in fechas if f.isoformat() not in antes]
-            if agregados:
-                nuevos.setdefault(svc, {})[prof] = agregados
+        for prof, dias in por_prof.items():
+            prev_dias = prev_prof.get(prof, {})   # {fecha_iso: [horas]}
+            dias_nuevos = {}
+            for f, horas in dias.items():
+                antes = set(prev_dias.get(f.isoformat(), []))
+                agregadas = [h for h in horas if h not in antes]
+                # Día nuevo sin horas legibles igual cuenta como cupo nuevo.
+                if agregadas or (f.isoformat() not in prev_dias and not horas):
+                    dias_nuevos[f] = agregadas
+            if dias_nuevos:
+                nuevos.setdefault(svc, {})[prof] = dias_nuevos
     return nuevos
 
 
 def _agenda_a_json(agenda: dict) -> dict:
-    return {svc: {prof: [f.isoformat() for f in fechas]
-                  for prof, fechas in por_prof.items()}
+    return {svc: {prof: {f.isoformat(): horas for f, horas in dias.items()}
+                  for prof, dias in por_prof.items()}
             for svc, por_prof in agenda.items()}
 
 
