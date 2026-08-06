@@ -4,7 +4,7 @@ on:
   schedule:
     # Los 5 min reales los da el trigger externo (cron-job.org vía API).
     # Este schedule queda solo como fallback por si el pinger externo falla.
-    - cron: "*/30 * * * *"       # fallback cada 30 min (best-effort de GitHub)
+    - cron: "*/59 * * * *"       # fallback cada 30 min (best-effort de GitHub)
   workflow_dispatch:              # gatillar a mano o vía API (trigger externo)
     inputs:
       forzar_resumen:
