@@ -29,9 +29,12 @@ jobs:
         uses: actions/cache@v4
         with:
           path: estado.json
-          key: estado-${{ github.run_id }}   # único por corrida -> siempre guarda
+          # key único por corrida (siempre guarda uno nuevo); restore-keys toma el
+          # más reciente. OJO: en el bloque `|`, un `#` NO es comentario, así que
+          # abajo va SOLO el prefijo, sin comentario, o contamina la clave.
+          key: estado-${{ github.run_id }}
           restore-keys: |
-            estado-                            # restaura el estado más reciente
+            estado-
       - run: pip install -r requirements.txt
       - run: playwright install --with-deps chromium
       - name: Ejecutar monitor
