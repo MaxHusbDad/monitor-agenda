@@ -215,27 +215,50 @@ def _dias_disponibles_en_vista(page, mes: int, anio: int) -> list[date]:
 
 
 def _avanzar_mes(page) -> bool:
-    """Avanza al mes siguiente en el selector de mes. Devuelve False si no puede.
+    """Intenta cambiar a otro mes en el selector. Best-effort y NO-FATAL.
 
-    FLAG FASE 2: la navegación de mes hay que confirmarla en vivo (el vue-select
-    #vs1 puede requerir otra interacción). Para una ventana de 4 semanas a
-    principio de mes normalmente NO se necesita: la última semana del mes actual
-    ya muestra los primeros días del siguiente. Igual se deja por robustez.
+    El dropdown de mes carga las opciones de forma lazy y lista únicamente los
+    meses CON disponibilidad para ese profesional. Al abrirlo suele haber solo el
+    mes actual y un placeholder oculto "Cargando más opciones..." que no resuelve
+    (ni con scroll ni con búsqueda). Por eso: abrimos, y solo clickeamos una
+    opción REAL, visible y de un mes distinto al actual. Si no hay tal opción, no
+    hay nada que avanzar (no hay disponibilidad en otros meses) y devolvemos
+    False. Cualquier error se traga y devuelve False para no romper la corrida.
     """
-    _esperar_sin_overlay(page)
-    combo = page.locator(f"{SEL_MES_WRAP} .vs__dropdown-toggle")
-    if not combo.count():
+    try:
+        actual = ""
+        if page.locator(SEL_MES).count():
+            actual = (page.locator(SEL_MES).first.inner_text() or "").strip()
+        _esperar_sin_overlay(page)
+        toggle = page.locator(f"{SEL_MES_WRAP} .vs__dropdown-toggle")
+        if not toggle.count():
+            return False
+        toggle.first.click()
+        page.wait_for_timeout(400)
+        lis = page.locator(f"{SEL_MES_WRAP} ul[role=listbox] li")
+        objetivo = None
+        for i in range(lis.count()):
+            li = lis.nth(i)
+            if not li.is_visible():
+                continue                     # descarta el placeholder oculto
+            txt = (li.inner_text() or "").strip()
+            if not txt or "Cargando" in txt or "No se han" in txt or txt == actual:
+                continue                     # descarta placeholders y el mes actual
+            objetivo = li
+            break
+        if objetivo is None:
+            page.keyboard.press("Escape")
+            return False
+        objetivo.click()
+        page.wait_for_timeout(500)
+        _esperar_sin_overlay(page)
+        return True
+    except Exception:
+        try:
+            page.keyboard.press("Escape")
+        except Exception:
+            pass
         return False
-    combo.first.click()
-    page.wait_for_timeout(300)
-    opciones = page.locator(f"{SEL_MES_WRAP} ul[role=listbox] li")
-    if not opciones.count():
-        page.keyboard.press("Escape")
-        return False
-    idx = 1 if opciones.count() > 1 else 0
-    opciones.nth(idx).click()
-    page.wait_for_timeout(500)
-    return True
 
 
 SEL_DIA_LIBRE = f"{SEL_DIA}.cursor-pointer:not(.cursor-not-allowed)"
@@ -269,12 +292,16 @@ def _leer_agenda_calendario(page, hoy: date, fin: date, semanas: int) -> list[da
     """Lee los días disponibles del calendario ya cargado, dentro de la ventana."""
     fechas: list[date] = []
     for _ in range(semanas // 4 + 2):   # tope de meses a revisar
-        _esperar_calendario(page)       # evita leer días fantasma sin asentar
-        mes, anio = _mes_dropdown(page)
-        fechas += _dias_disponibles_en_vista(page, mes, anio)
-        if date(anio, mes, monthrange(anio, mes)[1]) >= fin:
-            break
-        if not _avanzar_mes(page):
+        try:
+            _esperar_calendario(page)   # evita leer días fantasma sin asentar
+            mes, anio = _mes_dropdown(page)
+            fechas += _dias_disponibles_en_vista(page, mes, anio)
+            if date(anio, mes, monthrange(anio, mes)[1]) >= fin:
+                break
+            if not _avanzar_mes(page):
+                break
+        except Exception as e:   # no propagar: devolvemos lo leído hasta acá
+            log(f"Corte de lectura de calendario: {type(e).__name__}", "WARN")
             break
     return sorted({f for f in fechas if hoy <= f <= fin})
 
@@ -305,26 +332,37 @@ def revisar_web(cfg: Config) -> dict:
         page = browser.new_page()
         try:
             agenda: dict[str, dict[str, list[date]]] = {}
+            exitos = 0
             for fi, flow in enumerate(cfg.flows, start=1):
                 label = flow["label"]
-                profs = listar_profesionales(page, cfg.url, flow["cat"], flow["int"])
+                try:
+                    profs = listar_profesionales(page, cfg.url, flow["cat"], flow["int"])
+                except Exception as e:   # un flujo caído no tumba al resto
+                    log(f"Flujo {fi}: no se listaron profesionales ({type(e).__name__}); se omite", "WARN")
+                    _dump_debug(page, f"flujo{fi}_listar")
+                    continue
                 por_prof: dict[str, list[date]] = {}
                 for i, prof in enumerate(profs, start=1):
-                    _navegar_a_profesionales(page, cfg.url, flow["cat"], flow["int"])
-                    _esperar_sin_overlay(page)
-                    page.locator(f'{SEL_OPCION}[data-testid="{prof["testid"]}"]').click()
-                    _click_continuar(page)
-                    page.wait_for_selector(SEL_DIA, timeout=15_000)
-                    dias = _leer_agenda_calendario(page, hoy, fin, cfg.semanas)
-                    por_prof[f"Profesional {i}"] = dias   # nunca el nombre real
-                    # Log por índice, no por label: los logs de Actions son
-                    # públicos y el label puede tener el nombre real del servicio.
-                    log(f"Flujo {fi} / Profesional {i}: {len(dias)} día(s) en la ventana")
-                agenda[label] = por_prof
+                    try:
+                        _navegar_a_profesionales(page, cfg.url, flow["cat"], flow["int"])
+                        _esperar_sin_overlay(page)
+                        page.locator(f'{SEL_OPCION}[data-testid="{prof["testid"]}"]').click()
+                        _click_continuar(page)
+                        page.wait_for_selector(SEL_DIA, timeout=15_000)
+                        dias = _leer_agenda_calendario(page, hoy, fin, cfg.semanas)
+                        por_prof[f"Profesional {i}"] = dias   # nunca el nombre real
+                        exitos += 1
+                        # Log por índice, no por label: los logs de Actions son
+                        # públicos y el label puede tener el nombre real del servicio.
+                        log(f"Flujo {fi} / Profesional {i}: {len(dias)} día(s) en la ventana")
+                    except Exception as e:   # un profesional caído se omite
+                        log(f"Flujo {fi} / Profesional {i}: error ({type(e).__name__}); se omite", "WARN")
+                        _dump_debug(page, f"flujo{fi}_prof{i}")
+                if por_prof:
+                    agenda[label] = por_prof
+            if exitos == 0:
+                return {"ok": False, "error": "no se pudo leer ningún profesional"}
             return {"ok": True, "agenda": agenda}
-        except PlaywrightTimeoutError as e:
-            _dump_debug(page, "timeout")
-            return {"ok": False, "error": f"timeout de navegación: {e}"}
         finally:
             browser.close()
 
