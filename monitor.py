@@ -439,8 +439,15 @@ def _nuevos_cupos(prev_agenda: dict, agenda: dict) -> dict:
     nuevos: dict[str, dict[str, dict]] = {}
     for svc, por_prof in agenda.items():
         prev_prof = (prev_agenda or {}).get(svc, {})
+        if not isinstance(prev_prof, dict):
+            prev_prof = {}
         for prof, dias in por_prof.items():
             prev_dias = prev_prof.get(prof, {})   # {fecha_iso: [horas]}
+            if not isinstance(prev_dias, dict):
+                # Estado en formato viejo (lista de fechas, sin horas). Lo
+                # tratamos como baseline: no disparamos alertas en la corrida de
+                # migración; se re-guarda en el formato nuevo para la próxima.
+                continue
             dias_nuevos = {}
             for f, horas in dias.items():
                 antes = set(prev_dias.get(f.isoformat(), []))
@@ -563,21 +570,25 @@ def main() -> None:
     log(f"Estado previo: {'sí' if hay_prev else 'no'} | minuto={ahora.minute} | "
         f"toca_resumen={toca} | forzar={forzar}")
 
-    # Alertas de cupos nuevos: necesitan estado previo para comparar.
-    if hay_prev:
-        nuevos = _nuevos_cupos(prev.get("agenda", {}), agenda)
-        if nuevos:
-            enviar_alertas_nuevos(cfg, nuevos)
+    # Alertas y resumen van blindados: un error acá (estado raro, ntfy caído)
+    # NUNCA debe impedir guardar el estado, o el bot queda en crash-loop.
+    try:
+        if hay_prev:
+            nuevos = _nuevos_cupos(prev.get("agenda", {}), agenda)
+            if nuevos:
+                enviar_alertas_nuevos(cfg, nuevos)
+            else:
+                log("Sin cupos nuevos respecto a la corrida anterior")
         else:
-            log("Sin cupos nuevos respecto a la corrida anterior")
-    else:
-        log("Sin estado previo (primera corrida o cache no restaurado): sin alertas")
+            log("Sin estado previo (primera corrida o cache no restaurado): sin alertas")
 
-    # Resumen: SOLO 1 vez/hora (por reloj) o forzado manual. Nunca en cada corrida.
-    if forzar or toca:
-        enviar_resumen(cfg, agenda)
-    else:
-        log("No corresponde resumen en esta corrida")
+        # Resumen: SOLO 1 vez/hora (por reloj) o forzado manual. Nunca en cada corrida.
+        if forzar or toca:
+            enviar_resumen(cfg, agenda)
+        else:
+            log("No corresponde resumen en esta corrida")
+    except Exception as e:
+        log(f"Error en alertas/resumen (no bloquea el guardado): {type(e).__name__}: {e}", "ERROR")
 
     guardar_estado(agenda)
     sys.exit(0)
